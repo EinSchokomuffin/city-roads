@@ -2,8 +2,10 @@ import request from './request.js';
 import Progress from './Progress.js';
 
 let backends = [
-  'https://overpass.kumi.systems/api/interpreter',
   'https://overpass-api.de/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+  'https://overpass.osm.jp/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
   'https://overpass.openstreetmap.ru/cgi/interpreter'
 ]
 
@@ -32,9 +34,11 @@ export default function postData(data, progress) {
     if (err.cancelled) throw err;
 
     if (serverIndex >= backends.length - 1) {
-      // we can't do much anymore
+      // we can't do much anymore - all servers failed
+      err.allServersFailed = true;
+      err.serversAttempted = backends.length;
       throw err;
-    } 
+    }
 
     if (err.statusError) {
       progress.notify({

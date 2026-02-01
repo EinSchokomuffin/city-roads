@@ -36,11 +36,23 @@
     </div>
   </div>
   <div v-if='error' class='error message shadow'>
-    <div>Sorry, we were not able to download data from the OpenStreetMap.
-    It could be very busy at the moment processing other requests. <br/><br/> Please bookmark this website and <a href='#' @click.prevent="retry">try again</a> later?</div>
-    <div class='error-links'>
-      <a href='https://twitter.com/anvaka/status/1218971717734789120' title='see what it supposed to do' target="_blank">see how it should have worked</a>
-      <a :href='getBugReportURL(error)' :title='"report error: " + error' target='_blank'>report this bug</a>
+    <div v-if='isServerError(error)'>
+      <div>OpenStreetMap servers are busy or temporarily unavailable.</div>
+      <div class='error-note'>We tried {{error.serversAttempted || 'multiple'}} servers but none responded in time. This usually resolves within a few minutes.</div>
+      <div class='error-actions'>
+        <a href='#' @click.prevent="retry" class='retry-btn'>Retry</a>
+      </div>
+    </div>
+    <div v-else>
+      <div>Sorry, something went wrong while loading data.</div>
+      <div class='error-note'>{{error.message || error.toString()}}</div>
+      <div class='error-actions'>
+        <a href='#' @click.prevent="retry" class='retry-btn'>Retry</a>
+      </div>
+      <div class='error-links'>
+        <a href='https://twitter.com/anvaka/status/1218971717734789120' title='see what it supposed to do' target="_blank">see how it should have worked</a>
+        <a :href='getBugReportURL(error)' :title='"report error: " + error' target='_blank'>report this bug</a>
+      </div>
     </div>
   </div>
   <div v-if='loading' class='loading message shadow'>
@@ -150,6 +162,15 @@ export default {
               this.suggestions = suggestions; 
           }
         });
+    },
+
+    isServerError(error) {
+      if (!error) return false;
+      // These are transient server issues, not bugs in our code
+      return error.allServersFailed ||
+             error.invalidResponse ||
+             error.statusError ||
+             (error.message && error.message.includes('Failed to download'));
     },
 
     getBugReportURL(error) {
@@ -484,10 +505,33 @@ input {
   top: 4px;
   font-size: 12px;
 }
+.error-note {
+  font-size: 12px;
+  color: #666;
+  margin: 8px 0;
+}
+.error-actions {
+  margin: 12px 0 8px 0;
+}
+.retry-btn {
+  display: inline-block;
+  padding: 8px 24px;
+  background: highlight-color;
+  color: white;
+  text-decoration: none;
+  border-radius: 4px;
+  font-size: 14px;
+  &:hover {
+    opacity: 0.9;
+  }
+}
 .error-links {
   display: flex;
   justify-content: space-between;
   font-size: 12px;
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid border-color;
 }
 
 @media (max-width: small-screen) {

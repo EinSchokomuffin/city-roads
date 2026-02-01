@@ -51,6 +51,11 @@ export default class Query {
     this.promise = runAllNominmantimQueries(parts)
       .then(resolvedQueryString => postData(resolvedQueryString, this.progress))
       .then(osmResponse => {
+        if (!osmResponse || !osmResponse.elements) {
+          let err = new Error('OpenStreetMap servers returned an invalid response. Please try again.');
+          err.invalidResponse = true;
+          throw err;
+        }
         let grid = Grid.fromOSMResponse(osmResponse.elements)
         grid.queryBounds = this.queryBounds;
         return grid;
