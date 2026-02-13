@@ -12,9 +12,7 @@
  * http://stackoverflow.com/q/4998908
  */
 
-/* global define, Uint8Array, ArrayBuffer, module */
-
-;(function(window) {
+(function(window) {
   'use strict'
 
   var CanvasPrototype =

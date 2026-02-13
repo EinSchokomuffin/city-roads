@@ -188,8 +188,8 @@ export default function createScene(canvas) {
     }
   }
 
-  function saveToPNG(name) {
-    return toPNG(sceneAPI, {name});
+  function saveToPNG(name, options) {
+    return toPNG(sceneAPI, Object.assign({}, options, {name}));
   }
 
   function saveToSVG(name, options) {

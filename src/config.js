@@ -1,6 +1,8 @@
 import tinycolor from 'tinycolor2';
 
 export default {
+  defaultCity: 'Berlin',
+  lockToDefaultCity: true,
   /**
    * This is our caching backend
    */

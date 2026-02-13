@@ -21,27 +21,49 @@ export function toSVG(scene, options) {
   }, 30)
 }
 
-export function toPNG(scene, options) {
+export async function toPNG(scene, options) {
   options = options || {};
+  let scale = Number.isFinite(options.scale) ? options.scale : 4;
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+  const onComplete = typeof options.onComplete === 'function' ? options.onComplete : null;
+  const skipDownload = options.skipDownload === true;
 
-  getPrintableCanvas(scene).then((printableCanvas) => {
-    let fileName = getFileName(options.name, '.png');
+  notifyProgress(onProgress, 0, 'start');
+  let fileName = getFileName(options.name, '.png');
 
-    printableCanvas.toBlob(function(blob) {
-      let url = window.URL.createObjectURL(blob);
-      let a = document.createElement("a");
-      a.href = url;
-      a.download = fileName;
-      a.click();
-      revokeLater(url);
-    }, 'image/png')
-  })
+  while (scale >= 1) {
+    const printableCanvas = await getPrintableCanvas(scene, {scale, onProgress});
+    const blob = await canvasToBlob(printableCanvas, 'image/png');
+    if (blob) {
+      const url = window.URL.createObjectURL(blob);
+      if (!skipDownload) {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName;
+        a.click();
+        revokeLater(url);
+      }
+      if (onComplete) onComplete({blob, url, fileName});
+      notifyProgress(onProgress, 100, 'done');
+      return;
+    }
+
+    console.warn(`PNG export failed at scale ${scale}. Retrying with lower scale.`);
+    scale = scale <= 1 ? 0 : Math.max(1, Math.floor(scale / 2));
+  }
+
+  notifyProgress(onProgress, 100, 'error');
+  console.error('PNG export failed: canvas toBlob returned null at all scales');
 }
 
-export function getPrintableCanvas(scene) {
+export function getPrintableCanvas(scene, options) {
+  options = options || {};
+  const scale = Number.isFinite(options.scale) ? options.scale : 1;
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+
   let cityCanvas = getCanvas();
-  let width = cityCanvas.width;
-  let height = cityCanvas.height;
+  let width = cityCanvas.width * scale;
+  let height = cityCanvas.height * scale;
 
   let printable = document.createElement('canvas');
   let ctx = printable.getContext('2d');
@@ -50,7 +72,11 @@ export function getPrintableCanvas(scene) {
   scene.render();
   ctx.drawImage(cityCanvas, 0, 0, cityCanvas.width, cityCanvas.height, 0, 0, width, height);
 
-  return Promise.all(collectPrintable().map(label => drawTextLabel(label, ctx))).then(() => {
+  const labels = collectPrintable();
+  notifyProgress(onProgress, 15, 'canvas');
+
+  return drawLabels(labels, ctx, scale, onProgress).then(() => {
+    notifyProgress(onProgress, 95, 'labels');
     return printable;
   });
 }
@@ -71,11 +97,11 @@ function escapeFileName(str) {
 }
 
 
-function drawTextLabel(element, ctx) {
+function drawTextLabel(element, ctx, scale) {
   if (!element) return Promise.resolve();
 
   return new Promise((resolve, reject) => {
-    let dpr = window.devicePixelRatio || 1;
+    let dpr = scale || 1;
 
     if (element.element instanceof SVGSVGElement) {
       let svg = element.element;
@@ -111,6 +137,19 @@ function drawTextLabel(element, ctx) {
   });
 }
 
+function drawLabels(labels, ctx, scale, onProgress) {
+  let count = labels.length;
+  if (!count) return Promise.resolve();
+
+  return labels.reduce((p, label, index) => {
+    return p.then(() => {
+      let percent = 15 + Math.round(((index + 1) / count) * 80);
+      notifyProgress(onProgress, percent, 'labels');
+      return drawTextLabel(label, ctx, scale);
+    });
+  }, Promise.resolve());
+}
+
 function collectPrintable() {
   return Array.from(document.querySelectorAll('.printable')).map(element => {
     let computedStyle = window.getComputedStyle(element);
@@ -141,6 +180,17 @@ function revokeLater(url) {
   setTimeout(() => {
     window.URL.revokeObjectURL(url);
   }, 45000);
+}
+
+function canvasToBlob(canvas, type) {
+  return new Promise(resolve => {
+    canvas.toBlob(blob => resolve(blob || null), type);
+  });
+}
+
+function notifyProgress(handler, percent, stage) {
+  if (!handler) return;
+  handler({percent, stage});
 }
 
 // function toProtobuf() {

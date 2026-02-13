@@ -4,8 +4,8 @@
     <h3 class='site-header'>city roads</h3>
     <p class='description'>This website renders every single road within a city</p>
   </div>
-  <form v-on:submit.prevent="onSubmit" class='search-box'>
-      <input class='query-input' v-model='enteredInput' type='text' placeholder='Enter a city name to start' ref='input'>
+    <form v-on:submit.prevent="onSubmit" class='search-box'>
+      <input class='query-input' v-model='enteredInput' type='text' :placeholder='inputPlaceholder' ref='input' :disabled='lockedToDefaultCity' :readonly='lockedToDefaultCity'>
       <a type='submit' class='search-submit' href='#' @click.prevent='onSubmit' v-if='enteredInput && !hideInput'>{{mainActionText}}</a>
   </form>
   <div v-if='showWarning' class='prompt message note shadow'>
@@ -91,8 +91,10 @@ export default {
     LoadingIcon
   },
   data () {
-    const enteredInput = appState.get('q') || '';
+    const enteredInput = appState.get('q') || config.defaultCity || '';
     let hasValidArea = restoreStateFromQueryString();
+    const lockedToDefaultCity = config.lockToDefaultCity === true;
+    const inputPlaceholder = lockedToDefaultCity ? (config.defaultCity || 'Berlin') : 'Enter a city name to start';
 
     return {
       enteredInput,
@@ -102,12 +104,14 @@ export default {
       boxInTheMiddle: true,
       stillLoading: 0,
       error: null,
-      hideInput: false,
+      hideInput: lockedToDefaultCity,
       noRoads: false,
       clicked: false,
-      showWarning: hasValidArea, 
+      showWarning: hasValidArea,
       mainActionText: hasValidArea ? 'Download Area' : FIND_TEXT,
-      suggestions: []
+      suggestions: [],
+      lockedToDefaultCity,
+      inputPlaceholder
     }
   },
   watch: {
@@ -121,6 +125,10 @@ export default {
   },
   mounted() {
     this.$refs.input.focus();
+    if (this.lockedToDefaultCity && this.enteredInput) {
+      this.onSubmit();
+      return;
+    }
     if (queryState.get('auto')) {
       this.onSubmit();
     }
@@ -148,6 +156,10 @@ export default {
       findBoundaryByName(this.enteredInput)
         .then(suggestions => {
           this.loading = null;
+          if (this.lockedToDefaultCity && suggestions && suggestions.length) {
+            this.pickSuggestion(suggestions[0]);
+            return;
+          }
           this.hideInput = suggestions && suggestions.length;
           if (this.boxInTheMiddle) {
             // let animation that moves input box proceed a bit
@@ -244,6 +256,11 @@ export default {
         var pbf = new Pbf(byteArray);
         var obj = place.read(pbf);
         let grid = Grid.fromPBF(obj)
+        grid.queryBounds = {
+          areaId: suggestion.areaId,
+          bbox: suggestion.bbox,
+          place: suggestion.name
+        };
         this.$emit('loaded', grid);
       });
     },
@@ -267,6 +284,11 @@ export default {
           grid.setId(suggestion.areaId || suggestion.osm_id);
           grid.setIsArea(suggestion.areaId); // osm nodes don't have area.
           grid.setBBox(serializeBBox(suggestion.bbox));
+          grid.queryBounds = {
+            areaId: suggestion.areaId,
+            bbox: suggestion.bbox,
+            place: suggestion.name
+          };
           this.$emit('loaded', grid);
         }
       }).catch(err => {
