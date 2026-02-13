@@ -5,6 +5,7 @@
       <div class='controls'>
         <a href="#" class='print-button' data-action='toggle-settings' @click.prevent='toggleSettings'>Customize...</a>
         <a v-if='!lockedToDefaultCity' href="#" class='try-another' @click.prevent='startOver'>Try another city</a>
+        <a v-if='placeFound' href="#" class='reset-map' @click.prevent='resetMap'>Reset Map</a>
       </div>
       <div class='rail-status' v-if='railLoading || railStatus.length || railErrors.length'>
         <div class='rail-title'>Bahnnetze Berlin</div>
@@ -98,6 +99,65 @@
   <div v-if='stationTooltip.visible' class='station-tooltip' :style='{left: stationTooltip.left + "px", top: stationTooltip.top + "px"}'>
     <div class='station-tooltip-name'>{{stationTooltip.name}}</div>
     <div v-if='stationLineDisplay' class='station-tooltip-lines'>{{stationLineDisplay}}</div>
+  </div>
+
+  <svg v-if='placeFound && (radiusOverlays.length || lineOverlays.length || lineTool.selecting)' class='map-overlay' :style='overlayStyle' :width='overlayBounds.width' :height='overlayBounds.height'>
+    <defs>
+      <mask v-for='radius in radiusOverlays' :key='`mask-${radius.id}`' :id='`radius-cutout-${radius.id}`'>
+        <rect :width='overlayBounds.width' :height='overlayBounds.height' fill='white' />
+        <circle v-if='radius.screen && radius.screen.r' :cx='radius.screen.cx' :cy='radius.screen.cy' :r='radius.screen.r' fill='black' />
+      </mask>
+      <clipPath v-if='berlinBorderPolygonsScreen.length' id='berlin-border-clip' clipPathUnits='userSpaceOnUse'>
+        <polygon v-for='(poly, idx) in berlinBorderPolygonsScreen' :key='`berlin-${idx}`' :points='poly' />
+      </clipPath>
+    </defs>
+    <g v-for='radius in radiusOverlays' :key='radius.id'>
+      <rect v-if='radius.graySide === "outside"' :width='overlayBounds.width' :height='overlayBounds.height' fill='rgba(0,0,0,0.25)' :mask='`url(#radius-cutout-${radius.id})`' />
+      <circle v-if='radius.graySide === "inside" && radius.screen && radius.screen.r' :cx='radius.screen.cx' :cy='radius.screen.cy' :r='radius.screen.r' fill='rgba(0,0,0,0.25)' />
+      <circle v-if='radius.screen && radius.screen.r' :cx='radius.screen.cx' :cy='radius.screen.cy' :r='radius.screen.r' fill='transparent' stroke='rgba(0,0,0,0.45)' stroke-width='2' stroke-dasharray='6 6' />
+    </g>
+    <g v-for='line in lineOverlays' :key='line.id' :clip-path='berlinBorderClipUrl || null'>
+      <polygon v-if='line.screen && line.screen.shade' :points='line.screen.shade' fill='rgba(0,0,0,0.25)' />
+      <line v-if='line.screen && line.screen.x1 !== null' :x1='line.screen.x1' :y1='line.screen.y1' :x2='line.screen.x2' :y2='line.screen.y2' stroke='rgba(0,0,0,0.45)' stroke-width='2' stroke-dasharray='6 6' />
+    </g>
+    <g v-if='lineTool.selecting && lineTool.points.length'>
+      <circle :cx='lineTool.points[0].x' :cy='lineTool.points[0].y' r='11' fill='rgba(255, 64, 129, 0.2)' />
+      <circle :cx='lineTool.points[0].x' :cy='lineTool.points[0].y' r='7' fill='rgba(255, 64, 129, 0.85)' />
+    </g>
+  </svg>
+
+  <div v-if='lineTool.selecting' class='selection-hint'>
+    Gerade: Punkt {{lineTool.points.length + 1}}/2 waehlen
+  </div>
+
+  <div v-if='contextMenu.visible' ref='contextMenu' class='context-menu' :style='{left: contextMenu.x + "px", top: contextMenu.y + "px"}' @click.stop>
+    <div class='menu-section'>
+      <div class='menu-title'>Radius</div>
+      <label class='menu-row'>
+        <span>Radius (km)</span>
+        <input type='number' min='0' step='0.1' v-model.number='radiusTool.km' @change='refreshOverlay' />
+      </label>
+      <label class='menu-row'>
+        <span>Grauer Bereich</span>
+        <select v-model='radiusTool.graySide' @change='refreshOverlay'>
+          <option value='inside'>innen</option>
+          <option value='outside'>aussen</option>
+        </select>
+      </label>
+      <button type='button' class='menu-button' @click='applyRadiusFromMenu'>Radius hier setzen</button>
+    </div>
+    <div class='menu-divider'></div>
+    <div class='menu-section'>
+      <div class='menu-title'>Gerade</div>
+      <label class='menu-row'>
+        <span>Grauer Bereich</span>
+        <select v-model='lineTool.graySide' @change='refreshOverlay'>
+          <option value='left'>links</option>
+          <option value='right'>rechts</option>
+        </select>
+      </label>
+      <button type='button' class='menu-button' @click='startLineSelection'>Zwei Punkte wahlen</button>
+    </div>
   </div>
 
   <div v-if='exportMode && (exportingPng || exportResultUrl)' class='export-overlay'>
@@ -196,7 +256,38 @@ export default {
       exportMode: getQueryParam('export') === 'full',
       exportAutoTriggered: false,
       exportResultUrl: null,
-      exportResultName: ''
+      exportResultName: '',
+      contextMenu: {
+        visible: false,
+        x: 0,
+        y: 0,
+        world: null
+      },
+      overlayBounds: {
+        left: 0,
+        top: 0,
+        width: 0,
+        height: 0
+      },
+      radiusOverlays: [],
+      lineOverlays: [],
+      overlayIdSeed: 1,
+      berlinBorderPolygons: [],
+      berlinBorderPolygonsScreen: [],
+      radiusTool: {
+        km: 2,
+        graySide: 'inside',
+        center: null,
+        radiusMeters: 0
+      },
+      lineTool: {
+        graySide: 'left',
+        points: [],
+        pointsWorld: [],
+        line: null,
+        selecting: false
+      },
+      mapStateSaveTimer: null
     }
   },
   computed: {
@@ -205,6 +296,27 @@ export default {
     },
     stationLineDisplay() {
       return this.formatStationLines(this.stationTooltip.lines);
+    },
+    overlayStyle() {
+      return {
+        left: this.overlayBounds.left + 'px',
+        top: this.overlayBounds.top + 'px'
+      };
+    },
+    berlinBorderClipUrl() {
+      if (!this.berlinBorderPolygonsScreen.length) return null;
+      return 'url(#berlin-border-clip)';
+    }
+  },
+  watch: {
+    'radiusTool.km'() {
+      this.refreshOverlay();
+    },
+    'radiusTool.graySide'() {
+      this.refreshOverlay();
+    },
+    'lineTool.graySide'() {
+      this.refreshOverlay();
     }
   },
   created() {
@@ -213,11 +325,22 @@ export default {
     bus.on('line-color', this.syncLineColor);
     this.overlayManager = createOverlayManager();
   },
+  mounted() {
+    document.addEventListener('click', this.handleGlobalClick, true);
+    document.addEventListener('keydown', this.handleGlobalKeyDown, true);
+    window.addEventListener('resize', this.updateOverlayBounds, true);
+  },
   beforeUnmount() {
     debugger;
     this.overlayManager.dispose();
     this.dispose();
     this.unbindStationClickHandler();
+    this.unbindMapClickHandler();
+    this.unbindContextMenu();
+    if (this.mapStateSaveTimer) window.clearTimeout(this.mapStateSaveTimer);
+    document.removeEventListener('click', this.handleGlobalClick, true);
+    document.removeEventListener('keydown', this.handleGlobalKeyDown, true);
+    window.removeEventListener('resize', this.updateOverlayBounds, true);
     bus.off('scene-transform', this.handleSceneTransform);
     bus.off('background-color', this.syncBackground);
     bus.off('line-color', this.syncLineColor);
@@ -236,6 +359,16 @@ export default {
         window.scene = null;
       }
     },
+    resetMap() {
+      this.clearOverlays();
+      if (!this.scene) return;
+      const renderer = this.scene.getRenderer();
+      if (renderer && renderer.setViewBox && this.baseViewBox) {
+        renderer.setViewBox(this.baseViewBox);
+        if (renderer.renderFrame) renderer.renderFrame(true);
+      }
+      this.scheduleMapStateSave();
+    },
     toggleSettings() {
       this.showSettings = !this.showSettings;
     },
@@ -243,6 +376,8 @@ export default {
       this.zazzleLink = null;
       this.applyStationVisibility();
       this.updateStationTooltipPosition();
+      this.updateOverlayGeometry();
+      this.scheduleMapStateSave();
     },
     onGridLoaded(grid) {
       if (grid.isArea) {
@@ -263,6 +398,10 @@ export default {
       this.scene.on('layer-added', this.updateLayers);
       this.scene.on('layer-removed', this.updateLayers);
 
+      this.bindContextMenu(canvas);
+      this.bindMapClickHandler();
+      this.updateOverlayBounds();
+
       this.initZoomTracking();
 
       window.scene = this.scene;
@@ -274,6 +413,8 @@ export default {
       gridLayer.color = 'rgba(0, 0, 0, 0.15)';
       this.baseViewBox = gridLayer.getViewBox();
 
+      this.restoreMapState();
+
       this.loadRailLayers(gridLayer);
     },
 
@@ -284,6 +425,10 @@ export default {
       appState.enableCache();
 
       this.dispose();
+      this.unbindMapClickHandler();
+      this.unbindContextMenu();
+      this.clearOverlays();
+      this.closeContextMenu();
       this.placeFound = false;
       this.zazzleLink = null;
       this.showSettings = false;
@@ -446,7 +591,9 @@ export default {
           this.stationLayers = result.stationLayers || [];
           this.stationPoints = result.stationPoints || [];
           this.borderLayers = result.borderLayers || [];
+          this.berlinBorderPolygons = result.borderPolygons || [];
         }
+        this.updateOverlayGeometry();
         this.bindStationClickHandler();
         this.applyRailVisibility();
         this.updateLayers();
@@ -526,6 +673,7 @@ export default {
     },
 
     handleStationClick(e, renderer) {
+      if (this.lineTool.selecting) return;
       if (!this.railVisibility.stations) return;
       if (!this.stationPoints || this.stationPoints.length === 0) return;
       const original = e && e.originalEvent;
@@ -686,8 +834,432 @@ export default {
           this.generatingPreview = false;
         });
       });
+    },
+    bindContextMenu(canvas) {
+      if (!canvas || this.contextMenuHandler) return;
+      this.contextMenuHandler = (e) => this.handleCanvasContextMenu(e);
+      canvas.addEventListener('contextmenu', this.contextMenuHandler);
+    },
+    unbindContextMenu() {
+      if (!this.contextMenuHandler) return;
+      const canvas = getCanvas();
+      if (canvas) canvas.removeEventListener('contextmenu', this.contextMenuHandler);
+      this.contextMenuHandler = null;
+    },
+    handleCanvasContextMenu(e) {
+      if (!this.scene) return;
+      e.preventDefault();
+      const renderer = this.scene.getRenderer();
+      if (!renderer || !renderer.getSceneCoordinate) return;
+      const world = renderer.getSceneCoordinate(e.clientX, e.clientY);
+      if (!world) return;
+      this.contextMenu.world = {x: world[0], y: world[1]};
+      this.contextMenu.x = e.clientX + 4;
+      this.contextMenu.y = e.clientY + 4;
+      this.contextMenu.visible = true;
+    },
+    closeContextMenu() {
+      this.contextMenu.visible = false;
+    },
+    handleGlobalClick(e) {
+      if (!this.contextMenu.visible) return;
+      const menu = this.$refs.contextMenu;
+      if (menu && menu.contains(e.target)) return;
+      this.closeContextMenu();
+    },
+    handleGlobalKeyDown(e) {
+      if (e.key === 'Escape') {
+        this.closeContextMenu();
+        this.lineTool.selecting = false;
+      }
+    },
+    addRadiusOverlay(center, km, graySide) {
+      const radiusMeters = km * 1000;
+      this.radiusOverlays.push({
+        id: this.overlayIdSeed++,
+        center: {...center},
+        radiusMeters,
+        graySide,
+        screen: null
+      });
+    },
+    addLineOverlay(line, graySide) {
+      this.lineOverlays.push({
+        id: this.overlayIdSeed++,
+        line,
+        graySide,
+        screen: null
+      });
+    },
+    applyRadiusFromMenu() {
+      if (!this.contextMenu.world || !this.scene) return;
+      const km = Number(this.radiusTool.km);
+      if (!Number.isFinite(km) || km <= 0) return;
+      this.lineTool.points = [];
+      this.lineTool.selecting = false;
+      this.addRadiusOverlay(this.contextMenu.world, km, this.radiusTool.graySide);
+      this.updateOverlayGeometry();
+      this.closeContextMenu();
+      this.scheduleMapStateSave();
+    },
+    startLineSelection() {
+      this.lineTool.selecting = true;
+      this.lineTool.points = [];
+      this.lineTool.pointsWorld = [];
+      this.lineTool.line = null;
+      this.updateOverlayGeometry();
+      this.closeContextMenu();
+    },
+    bindMapClickHandler() {
+      if (!this.scene || this.mapClickHandler) return;
+      const renderer = this.scene.getRenderer();
+      if (!renderer || !renderer.on) return;
+      this.mapClickHandler = (e) => this.handleMapClick(e, renderer);
+      renderer.on('click', this.mapClickHandler);
+    },
+    unbindMapClickHandler() {
+      if (!this.mapClickHandler || !this.scene) return;
+      const renderer = this.scene.getRenderer();
+      if (renderer && renderer.off) renderer.off('click', this.mapClickHandler);
+      this.mapClickHandler = null;
+    },
+    handleMapClick(e, renderer) {
+      if (!this.lineTool.selecting) return;
+      const original = e && e.originalEvent;
+      if (original && original.button === 2) return;
+      if (!Number.isFinite(e.x) || !Number.isFinite(e.y)) return;
+      const screenPoint = renderer && renderer.getClientCoordinate
+        ? renderer.getClientCoordinate(e.x, e.y, 0)
+        : null;
+      this.lineTool.points.push(screenPoint ? {x: screenPoint.x, y: screenPoint.y} : {x: e.x, y: e.y});
+      this.lineTool.pointsWorld.push({x: e.x, y: e.y});
+      this.clearStationTooltip();
+
+      if (this.lineTool.pointsWorld.length < 2) return;
+
+      const a = this.lineTool.pointsWorld[0];
+      const b = this.lineTool.pointsWorld[1];
+      const vx = b.x - a.x;
+      const vy = b.y - a.y;
+      const len = Math.hypot(vx, vy);
+      if (!Number.isFinite(len) || len === 0) {
+        this.lineTool.selecting = false;
+        return;
+      }
+      const dir = {x: -vy / len, y: vx / len};
+      const mid = {x: (a.x + b.x) / 2, y: (a.y + b.y) / 2};
+      this.lineTool.line = {mid, dir, a, b};
+      this.addLineOverlay({mid, dir, a, b}, this.lineTool.graySide);
+      this.lineTool.selecting = false;
+      this.updateOverlayGeometry();
+      this.scheduleMapStateSave();
+    },
+    clearOverlays() {
+      this.radiusOverlays = [];
+      this.lineOverlays = [];
+      this.berlinBorderPolygonsScreen = [];
+      this.lineTool.points = [];
+      this.lineTool.pointsWorld = [];
+      this.lineTool.line = null;
+      this.lineTool.selecting = false;
+      this.scheduleMapStateSave();
+    },
+    updateOverlayBounds() {
+      const canvas = getCanvas();
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      this.overlayBounds.left = rect.left;
+      this.overlayBounds.top = rect.top;
+      this.overlayBounds.width = rect.width;
+      this.overlayBounds.height = rect.height;
+      this.updateOverlayGeometry();
+    },
+    updateOverlayGeometry() {
+      if (!this.scene) return;
+      this.updateBerlinBorderClip();
+      this.updateLineSelectionPreview();
+      this.updateRadiusOverlays();
+      this.updateLineOverlays();
+    },
+    updateLineSelectionPreview() {
+      if (!this.lineTool.selecting || !this.lineTool.pointsWorld.length) return;
+      const renderer = this.scene && this.scene.getRenderer();
+      if (!renderer || !renderer.getClientCoordinate) return;
+      this.lineTool.points = this.lineTool.pointsWorld
+        .map(p => renderer.getClientCoordinate(p.x, p.y, 0))
+        .filter(Boolean)
+        .map(p => ({x: p.x, y: p.y}));
+    },
+    updateRadiusOverlays() {
+      const renderer = this.scene && this.scene.getRenderer();
+      if (!renderer || !renderer.getClientCoordinate) return;
+      this.radiusOverlays.forEach(radius => {
+        if (!radius.center || !radius.radiusMeters) {
+          radius.screen = null;
+          return;
+        }
+        const center = renderer.getClientCoordinate(radius.center.x, radius.center.y, 0);
+        if (!center) {
+          radius.screen = null;
+          return;
+        }
+        const edge = renderer.getClientCoordinate(radius.center.x + radius.radiusMeters, radius.center.y, 0);
+        if (!edge) {
+          radius.screen = null;
+          return;
+        }
+        const r = Math.hypot(edge.x - center.x, edge.y - center.y);
+        radius.screen = {cx: center.x, cy: center.y, r};
+      });
+    },
+    updateLineOverlays() {
+      const renderer = this.scene && this.scene.getRenderer();
+      if (!renderer || !renderer.getClientCoordinate) return;
+      const bounds = {width: this.overlayBounds.width, height: this.overlayBounds.height};
+      this.lineOverlays.forEach(line => {
+        if (!line.line) {
+          line.screen = null;
+          return;
+        }
+        const {mid, dir} = line.line;
+        const midScreen = renderer.getClientCoordinate(mid.x, mid.y, 0);
+        const dirScreen = renderer.getClientCoordinate(mid.x + dir.x, mid.y + dir.y, 0);
+        if (!midScreen || !dirScreen) {
+          line.screen = null;
+          return;
+        }
+        const dx = dirScreen.x - midScreen.x;
+        const dy = dirScreen.y - midScreen.y;
+        const len = Math.hypot(dx, dy);
+        if (!Number.isFinite(len) || len === 0) {
+          line.screen = null;
+          return;
+        }
+        const direction = {x: dx / len, y: dy / len};
+        const intersections = getLineRectIntersections(midScreen, direction, bounds);
+        if (intersections.length < 2) {
+          line.screen = null;
+          return;
+        }
+
+        const leftSide = line.graySide === 'left';
+        line.screen = {
+          x1: intersections[0].x,
+          y1: intersections[0].y,
+          x2: intersections[1].x,
+          y2: intersections[1].y,
+          shade: buildHalfPlanePolygon(midScreen, direction, bounds, leftSide)
+        };
+      });
+    },
+    updateBerlinBorderClip() {
+      if (!this.scene || !this.berlinBorderPolygons.length) {
+        this.berlinBorderPolygonsScreen = [];
+        return;
+      }
+      const renderer = this.scene.getRenderer();
+      if (!renderer || !renderer.getClientCoordinate) return;
+      const polygons = [];
+      this.berlinBorderPolygons.forEach(poly => {
+        const points = poly.map(p => renderer.getClientCoordinate(p.x, p.y, 0)).filter(Boolean);
+        if (points.length < 3) return;
+        const encoded = points.map(p => `${p.x},${p.y}`).join(' ');
+        if (encoded) polygons.push(encoded);
+      });
+      this.berlinBorderPolygonsScreen = polygons;
+    },
+    refreshOverlay() {
+      this.updateOverlayGeometry();
+      this.scheduleMapStateSave();
+    },
+    getMapStateKey() {
+      const areaId = appState.get('areaId');
+      const osmId = appState.get('osm_id');
+      const name = appState.get('q');
+      return `mapState:${areaId || osmId || name || 'default'}`;
+    },
+    persistMapStateLocal(payload) {
+      try {
+        const key = this.getMapStateKey();
+        window.localStorage.setItem(key, JSON.stringify(payload));
+      } catch (e) {
+        // Ignore storage errors
+      }
+    },
+    restoreMapState() {
+      if (!this.scene) return;
+      let payload = null;
+      try {
+        const key = this.getMapStateKey();
+        const raw = window.localStorage.getItem(key);
+        if (raw) payload = JSON.parse(raw);
+      } catch (e) {
+        payload = null;
+      }
+      if (!payload) return;
+
+      const renderer = this.scene.getRenderer();
+      if (payload.viewBox && renderer && renderer.setViewBox) {
+        renderer.setViewBox(payload.viewBox);
+        if (renderer.renderFrame) renderer.renderFrame(true);
+      }
+
+      const radiusOverlays = Array.isArray(payload.radiusOverlays) ? payload.radiusOverlays : [];
+      const lineOverlays = Array.isArray(payload.lineOverlays) ? payload.lineOverlays : [];
+      if (!radiusOverlays.length && payload.radius) radiusOverlays.push(payload.radius);
+      if (!lineOverlays.length && payload.line) lineOverlays.push({line: payload.line, graySide: payload.line.graySide});
+
+      this.radiusOverlays = radiusOverlays
+        .filter(radius => radius && radius.center && Number.isFinite(radius.radiusMeters) && radius.radiusMeters > 0)
+        .map(radius => ({
+          id: this.overlayIdSeed++,
+          center: radius.center,
+          radiusMeters: radius.radiusMeters,
+          graySide: radius.graySide || 'inside',
+          screen: null
+        }));
+
+      this.lineOverlays = lineOverlays
+        .filter(entry => entry && entry.line && entry.line.mid && entry.line.dir)
+        .map(entry => ({
+          id: this.overlayIdSeed++,
+          line: entry.line,
+          graySide: entry.graySide || entry.line.graySide || 'left',
+          screen: null
+        }));
+
+      if (this.radiusOverlays.length) {
+        const first = this.radiusOverlays[0];
+        if (Number.isFinite(first.radiusMeters)) this.radiusTool.km = first.radiusMeters / 1000;
+      }
+
+      if (this.lineOverlays.length) {
+        const first = this.lineOverlays[0];
+        this.lineTool.graySide = first.graySide;
+      }
+
+      this.updateOverlayGeometry();
+    },
+    scheduleMapStateSave() {
+      if (!this.scene) return;
+      if (this.mapStateSaveTimer) window.clearTimeout(this.mapStateSaveTimer);
+      const delay = Number.isFinite(config.mapStateSaveDebounceMs) ? config.mapStateSaveDebounceMs : 400;
+      this.mapStateSaveTimer = window.setTimeout(() => {
+        this.mapStateSaveTimer = null;
+        this.saveMapState();
+      }, delay);
+    },
+    saveMapState() {
+      if (!this.scene) return;
+      const renderer = this.scene.getRenderer();
+      const viewBox = renderer && renderer.getViewBox ? renderer.getViewBox() : null;
+      const radiusOverlays = this.radiusOverlays
+        .filter(radius => radius.center && Number.isFinite(radius.radiusMeters) && radius.radiusMeters > 0)
+        .map(radius => ({
+          center: radius.center,
+          radiusMeters: radius.radiusMeters,
+          graySide: radius.graySide
+        }));
+      const lineOverlays = this.lineOverlays
+        .filter(line => line.line && line.line.mid && line.line.dir)
+        .map(line => ({
+          line: line.line,
+          graySide: line.graySide
+        }));
+      const payload = {
+        viewBox,
+        radiusOverlays,
+        lineOverlays,
+        radius: radiusOverlays.length ? radiusOverlays[0] : null,
+        line: lineOverlays.length ? {
+          mid: lineOverlays[0].line.mid,
+          dir: lineOverlays[0].line.dir,
+          graySide: lineOverlays[0].graySide
+        } : null
+      };
+      this.persistMapStateLocal(payload);
+      if (!config.mapStateEndpoint) return;
+      const body = JSON.stringify(payload);
+      if (navigator.sendBeacon) {
+        const blob = new Blob([body], {type: 'application/json'});
+        const queued = navigator.sendBeacon(config.mapStateEndpoint, blob);
+        if (queued) return;
+      }
+      fetch(config.mapStateEndpoint, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body,
+        keepalive: true
+      }).catch(() => {});
     }
   }
+}
+
+function getLineRectIntersections(point, direction, bounds) {
+  const hits = [];
+  const minX = 0;
+  const maxX = bounds.width;
+  const minY = 0;
+  const maxY = bounds.height;
+  const dx = direction.x;
+  const dy = direction.y;
+
+  if (dx !== 0) {
+    let t = (minX - point.x) / dx;
+    let y = point.y + t * dy;
+    if (y >= minY && y <= maxY) hits.push({x: minX, y});
+    t = (maxX - point.x) / dx;
+    y = point.y + t * dy;
+    if (y >= minY && y <= maxY) hits.push({x: maxX, y});
+  }
+
+  if (dy !== 0) {
+    let t = (minY - point.y) / dy;
+    let x = point.x + t * dx;
+    if (x >= minX && x <= maxX) hits.push({x, y: minY});
+    t = (maxY - point.y) / dy;
+    x = point.x + t * dx;
+    if (x >= minX && x <= maxX) hits.push({x, y: maxY});
+  }
+
+  return uniquePoints(hits).slice(0, 2);
+}
+
+function buildHalfPlanePolygon(point, direction, bounds, leftSide) {
+  const normal = {x: -direction.y, y: direction.x};
+  const corners = [
+    {x: 0, y: 0},
+    {x: bounds.width, y: 0},
+    {x: bounds.width, y: bounds.height},
+    {x: 0, y: bounds.height}
+  ];
+
+  const candidates = corners.filter(corner => {
+    const dot = (corner.x - point.x) * normal.x + (corner.y - point.y) * normal.y;
+    return leftSide ? dot >= 0 : dot <= 0;
+  });
+
+  const intersections = getLineRectIntersections(point, direction, bounds);
+  if (intersections.length < 2) return '';
+  candidates.push(intersections[0], intersections[1]);
+
+  const centroid = candidates.reduce((acc, p) => ({
+    x: acc.x + p.x / candidates.length,
+    y: acc.y + p.y / candidates.length
+  }), {x: 0, y: 0});
+
+  candidates.sort((a, b) => Math.atan2(a.y - centroid.y, a.x - centroid.x) - Math.atan2(b.y - centroid.y, b.x - centroid.x));
+  return candidates.map(p => `${p.x},${p.y}`).join(' ');
+}
+
+function uniquePoints(points) {
+  const unique = [];
+  const eps = 0.01;
+  points.forEach(p => {
+    const exists = unique.some(u => Math.hypot(u.x - p.x, u.y - p.y) < eps);
+    if (!exists) unique.push(p);
+  });
+  return unique;
 }
 
 function compareLineRefs(a, b) {
@@ -741,13 +1313,17 @@ function getQueryParam(key) {
 </script>
 
 <style lang='stylus'>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
 @import('./vars.styl');
 
 #app {
-  margin: 8px;
+  margin: 10px;
   max-height: 100vh;
   position: absolute;
   z-index: 1;
+  font-family: ui-font;
+  color: primary-text;
+  letter-spacing: 0.1px;
   h3 {
     font-weight: normal;
   }
@@ -774,26 +1350,36 @@ function getQueryParam(key) {
 }
 
 .controls {
-  height: 48px;
-  background: white;
+  height: 52px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(245, 249, 248, 0.98));
+  border: 1px solid border-color;
+  border-radius: 12px;
+  overflow: hidden;
   display: flex;
   flex-direction: row;
   align-items: stretch;
   width: desktop-controls-width;
   justify-content: space-around;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.2), 0 -1px 0px rgba(0,0,0,0.02);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
 
   a {
     text-decoration: none;
     display: flex;
     justify-content: center;
     align-items: center;
-    color: highlight-color;
+    color: primary-text;
     margin: 0;
     border: 0;
+    font-weight: 500;
+    font-size: 14px;
+    transition: background 0.18s ease, color 0.18s ease;
     &:hover {
       color: emphasis-background;
       background: highlight-color;
+    }
+    &:focus-visible {
+      outline: 2px solid rgba(15, 118, 110, 0.5);
+      outline-offset: -2px;
     }
   }
   a.try-another {
@@ -807,14 +1393,105 @@ function getQueryParam(key) {
       border: 1px dashed highlight-color;
     }
   }
+
+  a.reset-map {
+    flex: 1;
+    border-left: 1px solid border-color;
+  }
+}
+
+.map-overlay {
+  position: fixed;
+  pointer-events: none;
+  z-index: 1200;
+  width: 100%;
+  height: 100%;
+}
+
+.selection-hint {
+  position: fixed;
+  right: 16px;
+  top: 16px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 10px;
+  font-size: 12px;
+  box-shadow: 0 10px 18px rgba(15, 23, 42, 0.12);
+  z-index: 2600;
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 2700;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(245, 249, 248, 0.98));
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 12px;
+  padding: 12px;
+  width: 240px;
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.22);
+  font-size: 12px;
+}
+
+.menu-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.menu-title {
+  font-weight: 600;
+}
+
+.menu-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+
+  input,
+  select {
+    width: 110px;
+    border-radius: 8px;
+    border: 1px solid rgba(15, 23, 42, 0.16);
+    padding: 4px 6px;
+  }
+}
+
+.menu-divider {
+  height: 1px;
+  background: rgba(0, 0, 0, 0.08);
+  margin: 8px 0;
+}
+
+.menu-button {
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  background: rgba(244, 247, 246, 0.9);
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: center;
+  font-weight: 500;
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+}
+
+.menu-button:hover {
+  background: highlight-color;
+  color: white;
+}
+
+.menu-danger {
+  border-color: rgba(178, 0, 0, 0.4);
 }
 
 .rail-status {
   width: desktop-controls-width;
-  background: white;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 250, 249, 0.98));
   margin-top: 6px;
-  padding: 8px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.2), 0 -1px 0px rgba(0,0,0,0.02);
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid border-color;
+  box-shadow: 0 10px 20px rgba(15, 23, 42, 0.12);
   font-size: 12px;
 }
 
@@ -853,18 +1530,18 @@ function getQueryParam(key) {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.35);
+  background: rgba(10, 15, 18, 0.45);
   z-index: 1000;
 }
 
 .export-overlay-card {
   background: white;
-  padding: 20px 22px;
+  padding: 22px 24px;
   width: min(820px, 90vw);
   max-height: 90vh;
   overflow: auto;
-  border-radius: 12px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  border-radius: 16px;
+  box-shadow: 0 18px 46px rgba(15, 23, 42, 0.28);
 }
 
 .export-result {
@@ -919,6 +1596,7 @@ a {
   margin: -1px;
   text-decoration: none;
   color: highlight-color
+  transition: color 0.18s ease, background 0.18s ease;
 }
 a:focus {
   border: 1px dashed highlight-color;
@@ -927,11 +1605,12 @@ a:focus {
 .print-window {
   max-height: calc(100vh - 48px);
   overflow-y: auto;
-  border-top: 1px solid border-color;
-  background: white;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+  border: 1px solid border-color;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 250, 249, 0.98));
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.12);
   width: desktop-controls-width;
-  padding: 8px;
+  padding: 12px;
+  border-radius: 12px;
   .row a {
     margin-right: 4px;
   }
@@ -945,7 +1624,8 @@ a:focus {
 .message {
   border-top: 1px solid border-color
   border-bottom: 1px solid border-color
-  background: #F5F5F5;
+  background: rgba(245, 247, 246, 0.92);
+  border-radius: 10px;
 }
 
 .preview-actions {
@@ -978,7 +1658,7 @@ a:focus {
 
 .export-bar {
   height: 6px;
-  background: #e6e6e6;
+  background: rgba(15, 23, 42, 0.12);
   border-radius: 3px;
   overflow: hidden;
 }
@@ -996,7 +1676,7 @@ a:focus {
   top: 0;
   right: 0;
   bottom: 0;
-  background: rgba(247, 242, 232, 0.95);
+  background: rgba(10, 15, 18, 0.45);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1005,10 +1685,10 @@ a:focus {
 
 .export-overlay-card {
   background: white;
-  padding: 16px 20px;
+  padding: 18px 22px;
   width: 360px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2);
-  border-radius: 8px;
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.24);
+  border-radius: 14px;
 }
 
 .city-name {
@@ -1040,11 +1720,11 @@ a:focus {
   position: fixed;
   padding: 6px 8px;
   font-size: 12px;
-  background: rgba(255, 255, 255, 0.95);
+  background: rgba(255, 255, 255, 0.98);
   color: #1d1d1d;
-  border: 1px solid rgba(0, 0, 0, 0.15);
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  border: 1px solid rgba(15, 23, 42, 0.18);
+  border-radius: 8px;
+  box-shadow: 0 10px 20px rgba(15, 23, 42, 0.18);
   transform: translate(8px, -8px);
   pointer-events: none;
   z-index: 2000;

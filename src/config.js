@@ -11,6 +11,8 @@ export default {
   //areaServer: 'http://localhost:8085', // This is un-commented when I develop cache locally
   // So, using S3
   areaServer: 'https://d2uf7yjjctyxf.cloudfront.net/nov-02-2020',
+  mapStateEndpoint: '/api/map-state',
+  mapStateSaveDebounceMs: 400,
 
   getDefaultLineColor() {
     return tinycolor('rgba(26, 26, 26, 0.8)');

@@ -102,6 +102,7 @@ export default async function loadBerlinRail(scene, baseLayer, onProgress) {
   const stationLayers = [];
   const stationPoints = [];
   const borderLayers = [];
+  const borderPolygons = [];
   const stationLineMap = new Map();
   const stopPoints = [];
   let projectPoint;
@@ -113,7 +114,11 @@ export default async function loadBerlinRail(scene, baseLayer, onProgress) {
   if (cachedRail && projectPoint) {
     if (onProgress) onProgress('Rail cache', 'cached');
     await renderCachedRail(cachedRail, scene, projectPoint, addedLayers, railGroups, stationLayers, stationPoints, borderLayers, onProgress);
-    return {addedLayers, railGroups, stationLayers, stationPoints, borderLayers};
+    if (cachedRail.border && Array.isArray(cachedRail.border.segments)) {
+      const polygons = buildBorderPolygonsFromLonLatSegments(cachedRail.border.segments, projectPoint);
+      if (polygons.length) borderPolygons.push(...polygons);
+    }
+    return {addedLayers, railGroups, stationLayers, stationPoints, borderLayers, borderPolygons};
   }
 
   const tasks = RAIL_TYPES.map(info => async () => {
@@ -134,10 +139,10 @@ export default async function loadBerlinRail(scene, baseLayer, onProgress) {
 
   await loadStations(scene, baseLayer, stationLayers, stationPoints, stationLineMap, stopPoints, onProgress);
   if (baseLayer && baseLayer.grid && baseLayer.grid.projector) {
-    await loadBerlinBorder(scene, baseLayer.grid.projector, borderLayers, onProgress);
+    await loadBerlinBorder(scene, baseLayer.grid.projector, borderLayers, onProgress, borderPolygons, {addLayers: true});
   }
 
-  return {addedLayers, railGroups, stationLayers, stationPoints, borderLayers};
+  return {addedLayers, railGroups, stationLayers, stationPoints, borderLayers, borderPolygons};
 }
 
 async function loadRailCache() {
@@ -638,8 +643,9 @@ async function loadStations(scene, baseLayer, stationLayers, stationPoints, stat
   if (onProgress) onProgress('Stations', 'loaded');
 }
 
-async function loadBerlinBorder(scene, sharedProjector, borderLayers, onProgress) {
+async function loadBerlinBorder(scene, sharedProjector, borderLayers, onProgress, borderPolygons, options = {}) {
   if (!scene || !sharedProjector) return;
+  const addLayers = options.addLayers !== false;
 
   const query = `[out:json][timeout:120];relation[boundary="administrative"][admin_level="4"][name="Berlin"];out body;>;out body;`;
   let response = railCache.get('berlin-border');
@@ -655,6 +661,7 @@ async function loadBerlinBorder(scene, sharedProjector, borderLayers, onProgress
   const nodeMap = new Map(nodes.map(n => [n.id, n]));
   const wayMap = new Map(ways.map(w => [w.id, w]));
   const projector = createProjector(sharedProjector);
+  const segments = [];
 
   for (const rel of relations) {
     const members = rel.members || [];
@@ -669,12 +676,116 @@ async function loadBerlinBorder(scene, sharedProjector, borderLayers, onProgress
       if (!way || !way.nodes) continue;
       const points = way.nodes.map(id => nodeMap.get(id)).filter(Boolean).map(n => projector({lon: n.lon, lat: n.lat}));
       if (points.length < 2) continue;
-      const strip = appendLineStrip(scene, points, '#111111', true);
-      if (strip) borderLayers.push(strip);
+      if (borderPolygons) collectSegments(points, segments);
+      if (addLayers) {
+        const strip = appendLineStrip(scene, points, '#111111', true);
+        if (strip) borderLayers.push(strip);
+      }
     }
   }
 
+  if (borderPolygons && segments.length) {
+    const polygons = buildBorderPolygonsFromWorldSegments(segments);
+    if (polygons.length) borderPolygons.push(...polygons);
+  }
+
   if (onProgress) onProgress('Berlin Border', 'loaded');
+}
+
+function closePolygon(points) {
+  if (!points || points.length < 3) return null;
+  const first = points[0];
+  const last = points[points.length - 1];
+  if (!first || !last) return points;
+  if (Math.hypot(first.x - last.x, first.y - last.y) < 1e-6) return points;
+  return points.concat([{x: first.x, y: first.y}]);
+}
+
+function collectSegments(points, segments) {
+  for (let i = 0; i < points.length - 1; i++) {
+    segments.push({a: points[i], b: points[i + 1]});
+  }
+}
+
+function buildBorderPolygonsFromLonLatSegments(segments, projectPoint) {
+  if (!segments || !segments.length || !projectPoint) return [];
+  const worldSegments = [];
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (!Array.isArray(seg) || seg.length < 4) continue;
+    const a = projectPoint({lon: seg[0], lat: seg[1]});
+    const b = projectPoint({lon: seg[2], lat: seg[3]});
+    if (!a || !b) continue;
+    worldSegments.push({a, b});
+  }
+  return buildBorderPolygonsFromWorldSegments(worldSegments);
+}
+
+function buildBorderPolygonsFromWorldSegments(segments) {
+  if (!segments || !segments.length) return [];
+  const adjacency = new Map();
+  const pointsByKey = new Map();
+  const usedEdges = new Set();
+
+  const keyFor = (p) => `${p.x.toFixed(6)},${p.y.toFixed(6)}`;
+  const edgeKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+
+  segments.forEach(seg => {
+    const aKey = keyFor(seg.a);
+    const bKey = keyFor(seg.b);
+    if (!adjacency.has(aKey)) adjacency.set(aKey, new Set());
+    if (!adjacency.has(bKey)) adjacency.set(bKey, new Set());
+    adjacency.get(aKey).add(bKey);
+    adjacency.get(bKey).add(aKey);
+    pointsByKey.set(aKey, seg.a);
+    pointsByKey.set(bKey, seg.b);
+  });
+
+  const polygons = [];
+  const edgeKeys = [];
+  adjacency.forEach((neighbors, aKey) => {
+    neighbors.forEach(bKey => edgeKeys.push(edgeKey(aKey, bKey)));
+  });
+
+  for (let i = 0; i < edgeKeys.length; i++) {
+    const seed = edgeKeys[i];
+    if (usedEdges.has(seed)) continue;
+    const parts = seed.split('|');
+    const start = parts[0];
+    const next = parts[1];
+    const ring = [pointsByKey.get(start)];
+    let prev = start;
+    let current = next;
+    usedEdges.add(seed);
+
+    const guard = segments.length + 5;
+    let steps = 0;
+    while (steps < guard) {
+      steps += 1;
+      ring.push(pointsByKey.get(current));
+      if (current === start) break;
+      const neighbors = adjacency.get(current);
+      if (!neighbors || neighbors.size === 0) break;
+      let candidate = null;
+      for (const n of neighbors) {
+        if (n === prev) continue;
+        const ek = edgeKey(current, n);
+        if (!usedEdges.has(ek)) {
+          candidate = n;
+          usedEdges.add(ek);
+          break;
+        }
+      }
+      if (!candidate) break;
+      prev = current;
+      current = candidate;
+    }
+
+    const closed = closePolygon(ring);
+    if (closed && closed.length >= 3) polygons.push(closed);
+  }
+
+  return polygons;
 }
 
 function createProjector(projector) {

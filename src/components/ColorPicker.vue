@@ -131,10 +131,12 @@ export default {
   cursor: pointer;
   &-btn {
     display: inline-block;
-    width: 30px;
-    height: 22px;
-    border: 1px solid #666;
+    width: 32px;
+    height: 24px;
+    border: 1px solid rgba(15, 23, 42, 0.25);
+    border-radius: 8px;
     background: #FFFFFF;
+    box-shadow: 0 4px 10px rgba(15, 23, 42, 0.12);
   }
 
   .vue-colorpicker-panel {

@@ -383,6 +383,9 @@ function parseBBox(bboxStr) {
 @import('../vars.styl');
 .find-place  {
   width: desktop-controls-width;
+  font-family: ui-font;
+  color: primary-text;
+  gap: 8px;
 }
 
 h3.site-header {
@@ -395,9 +398,9 @@ h3.site-header {
 input {
   border: none;
   flex: 1;
-  font-family: 'Avenir', Helvetica, Arial, sans-serif;
+  font-family: ui-font;
   padding: 0;
-  color: #434343;
+  color: primary-text;
   height: 100%;
   font-size: 16px;
   &:focus {
@@ -407,15 +410,17 @@ input {
 
 .search-box {
   position: relative;
-  background-color: emphasis-background;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(245, 249, 248, 0.98));
   padding: 0 8px;
   padding: 0 0 0 8px;
-
-  box-shadow: 0 2px 4px rgba(0,0,0,0.2), 0 -1px 0px rgba(0,0,0,0.02);
-  height: 48px;
+  border: 1px solid border-color;
+  border-radius: 14px;
+  box-shadow: 0 10px 18px rgba(15, 23, 42, 0.12);
+  height: 52px;
   display: flex;
   font-size: 16px;
   cursor: text;
+  transition: box-shadow 0.18s ease, border-color 0.18s ease;
   a {
     cursor: pointer;
   }
@@ -425,6 +430,10 @@ input {
     flex-shrink: 0;
   }
 }
+.search-box:focus-within {
+  border-color: rgba(15, 118, 110, 0.4);
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.18);
+}
 
 .prompt {
   padding: 4px;
@@ -433,7 +442,7 @@ input {
 }
 
 .search-submit {
-  padding: 0 8px;
+  padding: 0 14px;
   align-items: center;
   text-decoration: none;
   display: flex;
@@ -442,6 +451,10 @@ input {
   outline: none;
   z-index: 1;
   color: highlight-color
+  font-weight: 600;
+  border-radius: 10px;
+  margin: 6px 6px 6px 0;
+  transition: background 0.18s ease, color 0.18s ease;
   &:hover {
     color: emphasis-background;
     background: highlight-color;
@@ -456,12 +469,22 @@ input {
   display: flex
   padding: 0 10px;
   text-decoration: none
-  color: highlight-color
+  color: primary-text
+  font-weight: 500;
+  transition: background 0.18s ease, color 0.18s ease;
+  &:hover {
+    background: rgba(15, 118, 110, 0.08);
+    color: highlight-color;
+  }
 }
 
 .suggestions {
   position: relative;
   background: white
+  border-radius: 12px;
+  border: 1px solid border-color;
+  box-shadow: 0 12px 22px rgba(15, 23, 42, 0.12);
+  overflow: hidden;
   .note {
     font-size: 10px;
     font-style: italic;
@@ -481,13 +504,14 @@ input {
 .loading {
   padding: 4px 8px;
   position: relative;
+  border-radius: 10px;
 }
 .loading svg {
   margin-right: 8px;
 }
 
 .shadow {
-  box-shadow: 0 2px 4px rgba(0,0,0,0.2)
+  box-shadow: 0 10px 20px rgba(15, 23, 42, 0.12)
 }
 
 .error {
@@ -519,6 +543,7 @@ input {
   padding: 8px;
   margin: 0;
   text-align: center;
+  color: secondary-color;
 }
 
 .cancel-request {
@@ -541,8 +566,9 @@ input {
   background: highlight-color;
   color: white;
   text-decoration: none;
-  border-radius: 4px;
+  border-radius: 10px;
   font-size: 14px;
+  font-weight: 600;
   &:hover {
     opacity: 0.9;
   }
