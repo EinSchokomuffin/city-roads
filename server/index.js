@@ -1,10 +1,13 @@
 const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const Datastore = require('nedb-promises');
 
 const app = express();
 const port = Number.parseInt(process.env.PORT || '8081', 10);
 const dbFilePath = process.env.MAP_STATE_DB_PATH || path.join(__dirname, 'data', 'map-state.db');
+const distPath = path.join(__dirname, '..', 'dist');
+const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
 
 const store = Datastore.create({
   filename: dbFilePath,
@@ -74,9 +77,20 @@ app.post('/api/map-state', async (req, res) => {
   }
 });
 
+if (hasDist) {
+  app.use(express.static(distPath));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) return next();
+    return res.sendFile(path.join(distPath, 'index.html'));
+  });
+}
+
 app.listen(port, () => {
   console.log(`[map-state-api] running on http://localhost:${port}`);
   console.log(`[map-state-api] db file: ${dbFilePath}`);
+  if (!hasDist) {
+    console.log('[map-state-api] dist folder not found. API-only mode is active.');
+  }
 });
 
 function normalizeScope(raw) {

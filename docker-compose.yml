@@ -1,0 +1,19 @@
+version: '3.9'
+services:
+  city-roads:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: city-roads:latest
+    container_name: city-roads
+    ports:
+      - "2937:8080"
+    environment:
+      - PORT=8080
+      - MAP_STATE_DB_PATH=/data/map-state.db
+    volumes:
+      - city-roads-data:/data
+    restart: unless-stopped
+
+volumes:
+  city-roads-data:

@@ -78,6 +78,33 @@ npm run dev
 In development, Vite proxies `/api/*` to `http://localhost:8081`.
 The backend stores map state records in `server/data/map-state.db`.
 
+## Docker deployment
+
+Run with Docker Compose (published on host port `2937`):
+
+```bash
+docker compose up -d --build
+```
+
+Then open:
+
+```text
+http://localhost:2937
+```
+
+Stop it with:
+
+```bash
+docker compose down
+```
+
+Without Compose:
+
+```bash
+docker build -t city-roads:latest .
+docker run -d --name city-roads -p 2937:8080 -v city-roads-data:/data city-roads:latest
+```
+
 ## License
 
 The source code is licensed under MIT license
