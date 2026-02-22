@@ -3,31 +3,10 @@
   <div id="app">
     <div v-if='placeFound'>
       <div class='controls'>
-        <a href="#" class='print-button' data-action='toggle-settings' @click.prevent='toggleSettings'>Customize...</a>
+          <button type='button' class='undo-button' :disabled='!canUndo' title='Undo' aria-label='Undo' @click='undoOverlay'>↶</button>
+          <button type='button' class='redo-button' :disabled='!canRedo' title='Redo' aria-label='Redo' @click='redoOverlay'>↷</button>
         <a v-if='!lockedToDefaultCity' href="#" class='try-another' @click.prevent='startOver'>Try another city</a>
         <a v-if='placeFound' href="#" class='reset-map' @click.prevent='resetMap'>Reset Map</a>
-      </div>
-      <div class='rail-status' v-if='placeFound'>
-        <div class='rail-title'>Bahnnetze Berlin</div>
-        <div v-if='railLoading' class='rail-loading'>Lade Bahnnetze…</div>
-        <div class='rail-toggles'>
-          <label><input type='checkbox' v-model='railVisibility.ubahn' @change='applyRailVisibility'> U-Bahn</label>
-          <label><input type='checkbox' v-model='railVisibility.sbahn' @change='applyRailVisibility'> S-Bahn</label>
-          <label><input type='checkbox' v-model='railVisibility.tram' @change='applyRailVisibility'> Tram</label>
-          <label><input type='checkbox' v-model='railVisibility.stations' @change='applyRailVisibility'> Stationen</label>
-          <label><input type='checkbox' v-model='railVisibility.border' @change='applyRailVisibility'> Berlin-Grenze</label>
-        </div>
-        <ul v-if='railStatus.length'>
-          <li v-for='entry in railStatus' :key='entry.name'>
-            {{entry.name}} — {{entry.status}}
-            <span v-if='railStats[entry.name]'>
-              (ways: {{railStats[entry.name].ways}}, nodes: {{railStats[entry.name].nodes}})
-            </span>
-          </li>
-        </ul>
-        <div v-if='railErrors.length' class='rail-errors'>
-          <div v-for='(err, idx) in railErrors' :key='idx'>{{err}}</div>
-        </div>
       </div>
       <div v-if='showSettings' class='print-window'>
         <h3>Export</h3>
@@ -266,6 +245,7 @@ export default {
         y: 0,
         world: null
       },
+      contextMenuOpenedAt: 0,
       overlayBounds: {
         left: 0,
         top: 0,
@@ -290,7 +270,10 @@ export default {
         line: null,
         selecting: false
       },
-      mapStateSaveTimer: null
+      mapStateSaveTimer: null,
+      overlayHistoryPast: [],
+      overlayHistoryFuture: [],
+      overlayHistoryLimit: 100
     }
   },
   computed: {
@@ -305,6 +288,12 @@ export default {
         left: this.overlayBounds.left + 'px',
         top: this.overlayBounds.top + 'px'
       };
+    },
+    canUndo() {
+      return this.overlayHistoryPast.length > 0;
+    },
+    canRedo() {
+      return this.overlayHistoryFuture.length > 0;
     },
     berlinBorderClipUrl() {
       if (!this.berlinBorderPolygonsScreen.length) return null;
@@ -420,6 +409,7 @@ export default {
       this.setBoundaryFromGrid(gridLayer.grid);
 
       await this.restoreMapState();
+      this.resetOverlayHistory();
 
       this.loadRailLayers(gridLayer);
     },
@@ -440,6 +430,8 @@ export default {
       this.showSettings = false;
       this.backgroundColor = config.getBackgroundColor().toRgb();
       this.labelColor = config.getLabelColor().toRgb();
+      this.overlayHistoryPast = [];
+      this.overlayHistoryFuture = [];
 
       document.body.style.backgroundColor = config.getBackgroundColor().toRgbString();
       getCanvas().style.visibility = 'hidden';
@@ -889,13 +881,23 @@ export default {
     bindContextMenu(canvas) {
       if (!canvas || this.contextMenuHandler) return;
       this.contextMenuHandler = (e) => this.handleCanvasContextMenu(e);
-      canvas.addEventListener('contextmenu', this.contextMenuHandler);
+      this.contextMenuPointerDownHandler = (e) => this.handleCanvasPointerDown(e);
+      canvas.addEventListener('contextmenu', this.contextMenuHandler, true);
+      canvas.addEventListener('pointerdown', this.contextMenuPointerDownHandler, true);
     },
     unbindContextMenu() {
       if (!this.contextMenuHandler) return;
       const canvas = getCanvas();
-      if (canvas) canvas.removeEventListener('contextmenu', this.contextMenuHandler);
+      if (canvas) canvas.removeEventListener('contextmenu', this.contextMenuHandler, true);
+      if (canvas && this.contextMenuPointerDownHandler) canvas.removeEventListener('pointerdown', this.contextMenuPointerDownHandler, true);
       this.contextMenuHandler = null;
+      this.contextMenuPointerDownHandler = null;
+    },
+    handleCanvasPointerDown(e) {
+      if (!e || e.button !== 2) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.handleCanvasContextMenu(e);
     },
     handleCanvasContextMenu(e) {
       if (!this.scene) return;
@@ -908,12 +910,14 @@ export default {
       this.contextMenu.x = e.clientX + 4;
       this.contextMenu.y = e.clientY + 4;
       this.contextMenu.visible = true;
+      this.contextMenuOpenedAt = Date.now();
     },
     closeContextMenu() {
       this.contextMenu.visible = false;
     },
     handleGlobalClick(e) {
       if (!this.contextMenu.visible) return;
+      if (Date.now() - this.contextMenuOpenedAt < 200) return;
       const menu = this.$refs.contextMenu;
       if (menu && menu.contains(e.target)) return;
       this.closeContextMenu();
@@ -946,6 +950,7 @@ export default {
       if (!this.contextMenu.world || !this.scene) return;
       const km = Number(this.radiusTool.km);
       if (!Number.isFinite(km) || km <= 0) return;
+      this.pushOverlayHistorySnapshot();
       this.lineTool.points = [];
       this.lineTool.selecting = false;
       this.addRadiusOverlay(this.contextMenu.world, km, this.radiusTool.graySide);
@@ -1000,12 +1005,15 @@ export default {
       const dir = {x: -vy / len, y: vx / len};
       const mid = {x: (a.x + b.x) / 2, y: (a.y + b.y) / 2};
       this.lineTool.line = {mid, dir, a, b};
+      this.pushOverlayHistorySnapshot();
       this.addLineOverlay({mid, dir, a, b}, this.lineTool.graySide);
       this.lineTool.selecting = false;
       this.updateOverlayGeometry();
       this.scheduleMapStateSave();
     },
     clearOverlays() {
+      if (!this.radiusOverlays.length && !this.lineOverlays.length) return;
+      this.pushOverlayHistorySnapshot();
       this.radiusOverlays = [];
       this.lineOverlays = [];
       this.berlinBorderPolygonsScreen = [];
@@ -1014,6 +1022,85 @@ export default {
       this.lineTool.line = null;
       this.lineTool.selecting = false;
       this.scheduleMapStateSave();
+    },
+    pushOverlayHistorySnapshot() {
+      const snapshot = this.getOverlayHistorySnapshot();
+      this.overlayHistoryPast.push(snapshot);
+      if (this.overlayHistoryPast.length > this.overlayHistoryLimit) {
+        this.overlayHistoryPast.shift();
+      }
+      this.overlayHistoryFuture = [];
+    },
+    getOverlayHistorySnapshot() {
+      return {
+        radiusOverlays: this.radiusOverlays.map(radius => ({
+          center: {...radius.center},
+          radiusMeters: radius.radiusMeters,
+          graySide: radius.graySide
+        })),
+        lineOverlays: this.lineOverlays.map(entry => ({
+          line: {
+            mid: {...entry.line.mid},
+            dir: {...entry.line.dir},
+            a: entry.line.a ? {...entry.line.a} : null,
+            b: entry.line.b ? {...entry.line.b} : null
+          },
+          graySide: entry.graySide
+        })),
+        radiusToolKm: this.radiusTool.km,
+        radiusToolGraySide: this.radiusTool.graySide,
+        lineToolGraySide: this.lineTool.graySide
+      };
+    },
+    applyOverlayHistorySnapshot(snapshot) {
+      if (!snapshot) return;
+      this.radiusOverlays = (snapshot.radiusOverlays || []).map(radius => ({
+        id: this.overlayIdSeed++,
+        center: {...radius.center},
+        radiusMeters: radius.radiusMeters,
+        graySide: radius.graySide || 'inside',
+        screen: null
+      }));
+      this.lineOverlays = (snapshot.lineOverlays || []).map(entry => ({
+        id: this.overlayIdSeed++,
+        line: {
+          mid: {...entry.line.mid},
+          dir: {...entry.line.dir},
+          a: entry.line.a ? {...entry.line.a} : null,
+          b: entry.line.b ? {...entry.line.b} : null
+        },
+        graySide: entry.graySide || 'left',
+        screen: null
+      }));
+
+      this.radiusTool.km = Number.isFinite(snapshot.radiusToolKm) ? snapshot.radiusToolKm : this.radiusTool.km;
+      this.radiusTool.graySide = snapshot.radiusToolGraySide || this.radiusTool.graySide;
+      this.lineTool.graySide = snapshot.lineToolGraySide || this.lineTool.graySide;
+      this.lineTool.points = [];
+      this.lineTool.pointsWorld = [];
+      this.lineTool.line = null;
+      this.lineTool.selecting = false;
+
+      this.updateOverlayGeometry();
+      this.scheduleMapStateSave();
+    },
+    resetOverlayHistory() {
+      this.overlayHistoryPast = [];
+      this.overlayHistoryFuture = [];
+    },
+    undoOverlay() {
+      if (!this.overlayHistoryPast.length) return;
+      const current = this.getOverlayHistorySnapshot();
+      const previous = this.overlayHistoryPast.pop();
+      this.overlayHistoryFuture.push(current);
+      this.applyOverlayHistorySnapshot(previous);
+    },
+    redoOverlay() {
+      if (!this.overlayHistoryFuture.length) return;
+      const current = this.getOverlayHistorySnapshot();
+      const next = this.overlayHistoryFuture.pop();
+      this.overlayHistoryPast.push(current);
+      this.applyOverlayHistorySnapshot(next);
     },
     updateOverlayBounds() {
       const canvas = getCanvas();
@@ -1516,7 +1603,8 @@ function decodeBase64Url(value) {
   justify-content: space-around;
   box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
 
-  a {
+  a,
+  button {
     text-decoration: none;
     display: flex;
     justify-content: center;
@@ -1524,6 +1612,7 @@ function decodeBase64Url(value) {
     color: primary-text;
     margin: 0;
     border: 0;
+    background: transparent;
     font-weight: 500;
     font-size: 14px;
     transition: background 0.18s ease, color 0.18s ease;
@@ -1540,17 +1629,24 @@ function decodeBase64Url(value) {
     flex: 1;
   }
 
-  a.print-button {
-    flex: 1;
-    border-right: 1px solid border-color;
-    &:focus {
-      border: 1px dashed highlight-color;
-    }
-  }
-
   a.reset-map {
     flex: 1;
     border-left: 1px solid border-color;
+  }
+
+  button.undo-button,
+  button.redo-button {
+    flex: 0.55;
+    border-left: 1px solid border-color;
+    border-right: 1px solid border-color;
+    cursor: pointer;
+    font-size: 20px;
+    line-height: 1;
+  }
+
+  button:disabled {
+    opacity: 0.45;
+    cursor: default;
   }
 }
 
@@ -1561,6 +1657,7 @@ function decodeBase64Url(value) {
   width: 100%;
   height: 100%;
 }
+
 
 .selection-hint {
   position: fixed;
@@ -1638,46 +1735,6 @@ function decodeBase64Url(value) {
   border-color: rgba(178, 0, 0, 0.4);
 }
 
-.rail-status {
-  width: desktop-controls-width;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 250, 249, 0.98));
-  margin-top: 6px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid border-color;
-  box-shadow: 0 10px 20px rgba(15, 23, 42, 0.12);
-  font-size: 12px;
-}
-
-.rail-title {
-  font-weight: bold;
-  margin-bottom: 4px;
-}
-
-.rail-loading {
-  color: highlight-color;
-  margin-bottom: 4px;
-}
-
-.rail-toggles {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  margin-bottom: 6px;
-  font-size: 12px;
-}
-
-.rail-toggles label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.rail-errors {
-  color: #b20000;
-  margin-top: 4px;
-}
-
 .export-overlay {
   position: fixed;
   inset: 0;
@@ -1715,19 +1772,35 @@ function decodeBase64Url(value) {
   text-decoration: none;
 }
 
-.col {
-    display: flex;
-    flex: 1;
-    select {
-      margin-left: 14px;
-    }
+.print-window {
+  border-radius: 12px;
+
+  .row a {
+    margin-right: 4px;
   }
+
+  h3 {
+    margin: 8px 0;
+    flex: 0.55;
+  }
+}
+
+.col {
+  display: flex;
+  flex: 1;
+
+  select {
+    margin-left: 14px;
+  }
+}
+
 .row {
   margin-top: 4px;
   display: flex;
   flex-direction: row;
   min-height: 32px;
 }
+
 .colors {
   display: flex;
   flex-direction: row;
@@ -1752,27 +1825,10 @@ a {
   color: highlight-color
   transition: color 0.18s ease, background 0.18s ease;
 }
+
 a:focus {
   border: 1px dashed highlight-color;
   outline: none;
-}
-.print-window {
-  max-height: calc(100vh - 48px);
-  overflow-y: auto;
-  border: 1px solid border-color;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 250, 249, 0.98));
-  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.12);
-  width: desktop-controls-width;
-  padding: 12px;
-  border-radius: 12px;
-  .row a {
-    margin-right: 4px;
-  }
-
-  h3 {
-    margin: 8px 0;
-    text-align: right;
-  }
 }
 
 .message {
@@ -1790,10 +1846,8 @@ a:focus {
   margin-top: 1px;
   width: desktop-controls-width;
   flex-direction: column;
-  align-items: stretch;
-  font-size: 14px;
   align-items: center;
-  display: flex;
+  font-size: 14px;
 
   .popup-help {
     text-align: center;
