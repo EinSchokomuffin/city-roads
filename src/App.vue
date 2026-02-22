@@ -7,12 +7,13 @@
         <a v-if='!lockedToDefaultCity' href="#" class='try-another' @click.prevent='startOver'>Try another city</a>
         <a v-if='placeFound' href="#" class='reset-map' @click.prevent='resetMap'>Reset Map</a>
       </div>
-      <div class='rail-status' v-if='railLoading || railStatus.length || railErrors.length'>
+      <div class='rail-status' v-if='placeFound'>
         <div class='rail-title'>Bahnnetze Berlin</div>
         <div v-if='railLoading' class='rail-loading'>Lade Bahnnetze…</div>
         <div class='rail-toggles'>
           <label><input type='checkbox' v-model='railVisibility.ubahn' @change='applyRailVisibility'> U-Bahn</label>
           <label><input type='checkbox' v-model='railVisibility.sbahn' @change='applyRailVisibility'> S-Bahn</label>
+          <label><input type='checkbox' v-model='railVisibility.tram' @change='applyRailVisibility'> Tram</label>
           <label><input type='checkbox' v-model='railVisibility.stations' @change='applyRailVisibility'> Stationen</label>
           <label><input type='checkbox' v-model='railVisibility.border' @change='applyRailVisibility'> Berlin-Grenze</label>
         </div>
@@ -229,12 +230,14 @@ export default {
       railVisibility: {
         sbahn: true,
         ubahn: true,
+        tram: true,
         stations: true,
         border: true
       },
       railLayersByType: {
         sbahn: [],
-        ubahn: []
+        ubahn: [],
+        tram: []
       },
       stationLayers: [],
       stationPoints: [],
@@ -379,7 +382,7 @@ export default {
       this.updateOverlayGeometry();
       this.scheduleMapStateSave();
     },
-    onGridLoaded(grid) {
+    async onGridLoaded(grid) {
       if (grid.isArea) {
         appState.set('areaId', grid.id);
         appState.unset('osm_id');
@@ -413,7 +416,10 @@ export default {
       gridLayer.color = 'rgba(0, 0, 0, 0.15)';
       this.baseViewBox = gridLayer.getViewBox();
 
-      this.restoreMapState();
+      this.resetRailState();
+      this.setBoundaryFromGrid(gridLayer.grid);
+
+      await this.restoreMapState();
 
       this.loadRailLayers(gridLayer);
     },
@@ -591,7 +597,9 @@ export default {
           this.stationLayers = result.stationLayers || [];
           this.stationPoints = result.stationPoints || [];
           this.borderLayers = result.borderLayers || [];
-          this.berlinBorderPolygons = result.borderPolygons || [];
+          if (Array.isArray(result.borderPolygons) && result.borderPolygons.length) {
+            this.berlinBorderPolygons = result.borderPolygons;
+          }
         }
         this.updateOverlayGeometry();
         this.bindStationClickHandler();
@@ -607,6 +615,48 @@ export default {
         this.railErrors.push(e && e.message ? e.message : 'Rail loading failed');
         console.error('Rail loading failed:', e);
       });
+    },
+
+    resetRailState() {
+      this.railVisibility = {
+        sbahn: true,
+        ubahn: true,
+        tram: true,
+        stations: true,
+        border: true
+      };
+      this.railLayersByType = {
+        sbahn: [],
+        ubahn: [],
+        tram: []
+      };
+      this.stationLayers = [];
+      this.stationPoints = [];
+      this.borderLayers = [];
+      this.railStatus = [];
+      this.railErrors = [];
+      this.railStats = {};
+    },
+
+    setBoundaryFromGrid(grid) {
+      const projector = grid && grid.getProjector && grid.getProjector();
+      const bounds = grid && grid.bounds;
+      if (!projector || !bounds) {
+        this.berlinBorderPolygons = [];
+        this.berlinBorderPolygonsScreen = [];
+        return;
+      }
+
+      const corners = [
+        {lon: bounds.left, lat: bounds.top},
+        {lon: bounds.right, lat: bounds.top},
+        {lon: bounds.right, lat: bounds.bottom},
+        {lon: bounds.left, lat: bounds.bottom}
+      ];
+      const polygon = corners.map(projector).filter(Boolean);
+      this.berlinBorderPolygons = polygon.length >= 3 ? [polygon] : [];
+      this.berlinBorderPolygonsScreen = [];
+      this.updateBerlinBorderClip();
     },
 
     applyRailVisibility() {
@@ -627,6 +677,7 @@ export default {
 
       toggleGroup(this.railLayersByType.sbahn, this.railVisibility.sbahn);
       toggleGroup(this.railLayersByType.ubahn, this.railVisibility.ubahn);
+      toggleGroup(this.railLayersByType.tram, this.railVisibility.tram);
       this.applyStationVisibility(renderer, toggleGroup);
       toggleGroup(this.borderLayers, this.railVisibility.border);
 
@@ -1078,6 +1129,39 @@ export default {
       const name = appState.get('q');
       return `mapState:${areaId || osmId || name || 'default'}`;
     },
+    getMapStateScope() {
+      return {
+        areaId: appState.get('areaId') || null,
+        osmId: appState.get('osm_id') || null,
+        name: appState.get('q') || null
+      };
+    },
+    serializeMapState(payload) {
+      try {
+        return encodeBase64Url(JSON.stringify({v: 1, payload}));
+      } catch (e) {
+        return null;
+      }
+    },
+    deserializeMapState(value) {
+      if (!value || typeof value !== 'string') return null;
+      try {
+        const decoded = decodeBase64Url(value);
+        if (!decoded) return null;
+        const parsed = JSON.parse(decoded);
+        if (parsed && parsed.payload) return parsed.payload;
+      } catch (e) {
+        // Ignore malformed state in URL
+      }
+      return null;
+    },
+    isPayloadScopeMatch(payload) {
+      if (!payload || !payload.scope) return true;
+      const current = this.getMapStateScope();
+      return payload.scope.areaId === current.areaId &&
+        payload.scope.osmId === current.osmId &&
+        payload.scope.name === current.name;
+    },
     persistMapStateLocal(payload) {
       try {
         const key = this.getMapStateKey();
@@ -1086,17 +1170,35 @@ export default {
         // Ignore storage errors
       }
     },
-    restoreMapState() {
-      if (!this.scene) return;
-      let payload = null;
+    persistMapStateQuery(payload) {
+      const encoded = this.serializeMapState(payload);
+      if (!encoded) {
+        appState.unset('map');
+        return;
+      }
+      appState.set('map', encoded);
+    },
+    readMapStateQuery() {
+      return this.deserializeMapState(appState.get('map'));
+    },
+    readMapStateLocal() {
       try {
         const key = this.getMapStateKey();
         const raw = window.localStorage.getItem(key);
-        if (raw) payload = JSON.parse(raw);
+        if (!raw) return null;
+        return JSON.parse(raw);
       } catch (e) {
-        payload = null;
+        return null;
       }
+    },
+    async restoreMapState() {
+      if (!this.scene) return;
+      let payload = await this.readMapStateRemote();
+      if (!payload || !this.isPayloadScopeMatch(payload)) payload = this.readMapStateLocal();
+      if (!payload || !this.isPayloadScopeMatch(payload)) payload = this.readMapStateQuery();
       if (!payload) return;
+
+      this.persistMapStateLocal(payload);
 
       const renderer = this.scene.getRenderer();
       if (payload.viewBox && renderer && renderer.setViewBox) {
@@ -1140,6 +1242,28 @@ export default {
 
       this.updateOverlayGeometry();
     },
+    async readMapStateRemote() {
+      if (!config.mapStateEndpoint) return null;
+      const scope = this.getMapStateScope();
+      const query = new URLSearchParams();
+      if (scope.areaId) query.set('areaId', scope.areaId);
+      if (scope.osmId) query.set('osmId', scope.osmId);
+      if (scope.name) query.set('q', scope.name);
+      const url = `${config.mapStateEndpoint}?${query.toString()}`;
+
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: {'Accept': 'application/json'}
+        });
+        if (!response.ok) return null;
+        const data = await response.json();
+        if (data && data.payload) return data.payload;
+      } catch (e) {
+        // Ignore backend errors and use local fallback
+      }
+      return null;
+    },
     scheduleMapStateSave() {
       if (!this.scene) return;
       if (this.mapStateSaveTimer) window.clearTimeout(this.mapStateSaveTimer);
@@ -1167,6 +1291,7 @@ export default {
           graySide: line.graySide
         }));
       const payload = {
+        scope: this.getMapStateScope(),
         viewBox,
         radiusOverlays,
         lineOverlays,
@@ -1178,6 +1303,7 @@ export default {
         } : null
       };
       this.persistMapStateLocal(payload);
+      if (config.mapStateUseQueryPersistence) this.persistMapStateQuery(payload);
       if (!config.mapStateEndpoint) return;
       const body = JSON.stringify(payload);
       if (navigator.sendBeacon) {
@@ -1310,6 +1436,33 @@ function getQueryParam(key) {
   return params.get(key);
 }
 
+function encodeBase64Url(value) {
+  if (typeof btoa !== 'function' || typeof TextEncoder === 'undefined') return null;
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function decodeBase64Url(value) {
+  if (typeof atob !== 'function' || typeof TextDecoder === 'undefined') return null;
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
 </script>
 
 <style lang='stylus'>
@@ -1340,6 +1493,7 @@ function getQueryParam(key) {
   top: 0;
   right: 0;
   bottom: 0;
+  pointer-events: none;
 }
 
 .overlay-active {

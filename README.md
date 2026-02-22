@@ -58,6 +58,26 @@ npm run build
 npm run build --report
 ```
 
+## Persisting overlays across devices
+
+The app can persist map overlays (radius/line shapes and view box) in a backend database,
+so you don't need to share long URLs.
+
+Run the backend API in one terminal:
+
+```bash
+npm run server
+```
+
+Run the frontend in another terminal:
+
+```bash
+npm run dev
+```
+
+In development, Vite proxies `/api/*` to `http://localhost:8081`.
+The backend stores map state records in `server/data/map-state.db`.
+
 ## License
 
 The source code is licensed under MIT license

@@ -25,6 +25,10 @@ const tasks = [
     query: `[out:json][timeout:120][bbox:${BERLIN_BBOX}];(relation[route="light_rail"];);out body;>;out body;`
   },
   {
+    name: 'route_tram.json',
+    query: `[out:json][timeout:120][bbox:${BERLIN_BBOX}];(relation[route="tram"];);out body;>;out body;`
+  },
+  {
     name: 'rail_rail.json',
     query: `[out:json][timeout:120][bbox:${BERLIN_BBOX}];(way[railway="rail"];);(._;>;);out body;`
   },
@@ -34,6 +38,9 @@ const tasks = [
       node[railway="station"];
       node[public_transport="station"];
       node[station];
+      node[railway="tram_stop"];
+      node[public_transport="platform"][tram="yes"];
+      node[public_transport="stop_position"][tram="yes"];
     );out body;`
   },
   {
@@ -67,15 +74,18 @@ async function run() {
 function buildRailCache() {
   const routeSubway = readJson(path.join(OUT_DIR, 'route_subway.json'));
   const routeLightRail = readJson(path.join(OUT_DIR, 'route_light_rail.json'));
+  const routeTram = readJson(path.join(OUT_DIR, 'route_tram.json'));
   const stations = readJson(path.join(OUT_DIR, 'stations.json'));
   const border = readJson(path.join(OUT_DIR, 'border.json'));
 
   const sbahnSegmentsByColor = buildRouteSegmentsByColor(routeLightRail, 'sbahn', 'light_rail', '#006F35');
   const ubahnSegmentsByColor = buildRouteSegmentsByColor(routeSubway, 'ubahn', 'subway', '#115D91');
+  const tramSegmentsByColor = buildRouteSegmentsByColor(routeTram, 'tram', 'tram', '#D50000');
   const borderSegments = buildBorderSegments(border);
   const stopPoints = mergeStopPoints([
     buildStopPoints(routeLightRail),
-    buildStopPoints(routeSubway)
+    buildStopPoints(routeSubway),
+    buildStopPoints(routeTram)
   ]);
   const majorStations = buildStations(stations, stopPoints);
 
@@ -93,6 +103,11 @@ function buildRailCache() {
         color: '#115D91',
         lineWidth: 2,
         segmentsByColor: ubahnSegmentsByColor
+      },
+      tram: {
+        color: '#D50000',
+        lineWidth: 2,
+        segmentsByColor: tramSegmentsByColor
       }
     },
     stations: {
@@ -186,6 +201,7 @@ function buildStations(osmResponse, stopPoints) {
   const nodes = osmResponse.elements.filter(el => el.type === 'node');
   const stations = [];
   const stopIndex = createStopIndex(stopPoints, 0.002);
+  const seenStations = new Set();
 
   nodes.forEach(node => {
     const tags = node.tags || {};
@@ -194,9 +210,13 @@ function buildStations(osmResponse, stopPoints) {
     let color = '#FFFFFF';
     if (tags.station === 'subway' || tags.subway === 'yes') color = '#115D91';
     else if (tags.network && tags.network.includes('S-Bahn')) color = '#006F35';
+    else if (tags.railway === 'tram_stop' || tags.tram === 'yes') color = '#D50000';
     else if (tags.railway === 'station') color = '#EC6608';
 
     const name = tags.name || tags['name:de'] || tags['name:en'] || tags.ref || 'Unbenannt';
+    const key = buildStationKey(node, name);
+    if (seenStations.has(key)) return;
+    seenStations.add(key);
     const lines = pickLinesForStation(stopIndex, node, 150);
 
     stations.push({
@@ -210,6 +230,15 @@ function buildStations(osmResponse, stopPoints) {
   });
 
   return stations;
+}
+
+function buildStationKey(node, name) {
+  const lat = Number(node.lat);
+  const lon = Number(node.lon);
+  const cleanName = String(name || '').trim().toLowerCase();
+  const latKey = Number.isFinite(lat) ? lat.toFixed(6) : '0';
+  const lonKey = Number.isFinite(lon) ? lon.toFixed(6) : '0';
+  return `${latKey}:${lonKey}:${cleanName}`;
 }
 
 function buildStopPoints(osmResponse) {

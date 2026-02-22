@@ -18,7 +18,13 @@ export default defineConfig({
       __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: false
     },
   server: {
-    port: 8080
+    port: 8080,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8081',
+        changeOrigin: true
+      }
+    }
   },
   resolve: {
     alias: {

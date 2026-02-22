@@ -31,6 +31,14 @@ const RAIL_TYPES = [
     route: 'subway',
     railway: 'subway'
   },
+  {
+    id: 'tram',
+    name: 'Tram',
+    color: '#D50000',
+    lineWidth: 2,
+    route: 'tram',
+    railway: 'tram'
+  },
   
 ];
 
@@ -118,6 +126,15 @@ export default async function loadBerlinRail(scene, baseLayer, onProgress) {
       const polygons = buildBorderPolygonsFromLonLatSegments(cachedRail.border.segments, projectPoint);
       if (polygons.length) borderPolygons.push(...polygons);
     }
+    if (!cachedRail.rail || !cachedRail.rail.tram) {
+      const tramInfo = RAIL_TYPES.find(entry => entry.id === 'tram');
+      if (tramInfo && baseLayer) {
+        const staticTram = await loadStaticOnly(`route_${tramInfo.route}.json`, tramInfo.route);
+        if (staticTram) {
+          await loadRouteLines(tramInfo, baseLayer, scene, addedLayers, railGroups, new Map(), [], onProgress);
+        }
+      }
+    }
     return {addedLayers, railGroups, stationLayers, stationPoints, borderLayers, borderPolygons};
   }
 
@@ -159,7 +176,7 @@ async function renderCachedRail(cache, scene, projectPoint, addedLayers, railGro
   if (!renderer) return;
 
   const rail = cache.rail || {};
-  const railOrder = ['sbahn', 'ubahn'];
+  const railOrder = ['sbahn', 'ubahn', 'tram'];
   for (const key of railOrder) {
     const info = RAIL_TYPES.find(entry => entry.id === key);
     const entry = rail[key];
@@ -576,6 +593,9 @@ async function loadStations(scene, baseLayer, stationLayers, stationPoints, stat
     node[railway="station"];
     node[public_transport="station"];
     node[station];
+    node[railway="tram_stop"];
+    node[public_transport="platform"][tram="yes"];
+    node[public_transport="stop_position"][tram="yes"];
   );out body;`;
 
   let response = railCache.get('stations');
@@ -600,6 +620,7 @@ async function loadStations(scene, baseLayer, stationLayers, stationPoints, stat
   const major = [];
   const minor = [];
   const stopIndex = createStopIndex(stopPoints, 0.002);
+  const seenStations = new Set();
   nodes.forEach(node => {
     const tags = node.tags || {};
     const isMajor = tags.station === 'major' || tags.station === 'interchange' || tags.railway === 'station';
@@ -607,9 +628,13 @@ async function loadStations(scene, baseLayer, stationLayers, stationPoints, stat
     let color = '#FFFFFF';
     if (tags.station === 'subway' || tags.subway === 'yes') color = '#115D91';
     else if (tags.network && tags.network.includes('S-Bahn')) color = '#006F35';
+    else if (tags.railway === 'tram_stop' || tags.tram === 'yes') color = '#D50000';
     else if (tags.railway === 'station') color = '#EC6608';
 
     const name = tags.name || tags['name:de'] || tags['name:en'] || tags.ref || 'Unbenannt';
+    const key = buildStationKey(node, name);
+    if (seenStations.has(key)) return;
+    seenStations.add(key);
     const lineSet = stationLineMap && stationLineMap.get(node.id);
     const directLines = lineSet ? Array.from(lineSet) : [];
     const nearbyLines = pickLinesForStation(stopIndex, node, 150);
@@ -641,6 +666,15 @@ async function loadStations(scene, baseLayer, stationLayers, stationPoints, stat
   }
 
   if (onProgress) onProgress('Stations', 'loaded');
+}
+
+function buildStationKey(node, name) {
+  const lat = Number(node.lat);
+  const lon = Number(node.lon);
+  const cleanName = String(name || '').trim().toLowerCase();
+  const latKey = Number.isFinite(lat) ? lat.toFixed(6) : '0';
+  const lonKey = Number.isFinite(lon) ? lon.toFixed(6) : '0';
+  return `${latKey}:${lonKey}:${cleanName}`;
 }
 
 async function loadBerlinBorder(scene, sharedProjector, borderLayers, onProgress, borderPolygons, options = {}) {
@@ -919,6 +953,21 @@ async function loadStaticOrOverpass(fileName, query, cacheKey) {
   const osmResponse = await postData(query, progress);
   railCache.set(cacheKey, osmResponse);
   return osmResponse;
+}
+
+async function loadStaticOnly(fileName, cacheKey) {
+  const cacheHit = railCache.get(cacheKey);
+  if (cacheHit) return cacheHit;
+
+  try {
+    const staticResponse = await request(`/berlin/rail/${fileName}`, {responseType: 'json'});
+    if (staticResponse && staticResponse.elements) {
+      railCache.set(cacheKey, staticResponse);
+      return staticResponse;
+    }
+  } catch (e) {
+    // Static cache not found or not accessible.
+  }
 }
 
 function delay(ms) {

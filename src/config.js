@@ -13,6 +13,7 @@ export default {
   areaServer: 'https://d2uf7yjjctyxf.cloudfront.net/nov-02-2020',
   mapStateEndpoint: '/api/map-state',
   mapStateSaveDebounceMs: 400,
+  mapStateUseQueryPersistence: false,
 
   getDefaultLineColor() {
     return tinycolor('rgba(26, 26, 26, 0.8)');
